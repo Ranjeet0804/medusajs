@@ -1,0 +1,60 @@
+name: Deploy Medusa Backend
+run-name: Build Backend on ECS Server
+
+permissions:
+  id-token: write
+  contents: read
+  
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.IAM_OIDC_ROLE }}
+          role-session-name: Github
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: 'true'
+
+      - name: Build and Push Docker Image
+        run: |
+          DOCKER_BUILDKIT=1 docker build -t ${{ steps.login-ecr.outputs.registry }}/medusa:${{ github.sha }} .
+          docker push ${{ steps.login-ecr.outputs.registry }}/medusa:${{ github.sha }}
+
+      - name: Download task definition
+        env:
+          TASK_DEFINITION_NAME: ${{ secrets.TASK_DEFINITION_NAME }}
+        run: |
+          aws ecs describe-task-definition --task-definition $TASK_DEFINITION_NAME  --query taskDefinition > task-definition.json
+
+      - name: Create new revision for Task definition
+        id: task-def-scheduler
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ secrets.CONTAINER_NAME}}
+          image: "${{ steps.login-ecr.outputs.registry }}/medusa:${{ github.sha }}"
+
+      - name: Update Scheduler Service with new Task Definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-scheduler.outputs.task-definition }}
+          service: ${{ secrets.ECS_SERVICE }}
+          cluster: ${{ secrets.ECS_CLUSTER }}
+          wait-for-service-stability: true
